@@ -33,8 +33,18 @@ endif()
 
 find_package(OpenCV REQUIRED)
 message(STATUS "OpenCV Include: ${OpenCV_INCLUDE_DIRS}")
-message(STTAUS "OpenCV LibsL ${OpenCV_LIBS}")
+message(STTAUS "OpenCV Libs ${OpenCV_LIBS}")
 include_directories(${OpenCV_INCLUDE_DIRS})
 
+# Use Boost 1.63.0
+set(Boost_INCLUDE_DIRS ${BOOST_DIR}/include/)
+set(Boost_LIBRARIES 
+		${BOOST_DIR}/lib/libboost_system.so
+		${BOOST_DIR}/lib/libboost_filesystem.so
+	)
+message(STATUS "Boost Include: ${Boost_INCLUDE_DIRS}")
+message(STTAUS "Boost Libs ${Boost_LIBRARIES}")
+include_directories(${Boost_INCLUDE_DIRS})
+
 add_executable(slam_playground ${PROJECT_SOURCE_DIR}/src/main.cpp)
-target_link_libraries(slam_playground ${OpenCV_LIBS})
+target_link_libraries(slam_playground ${OpenCV_LIBS} ${Boost_LIBRARIES})
