@@ -8,6 +8,7 @@
 #include "boost/filesystem.hpp"
 
 using namespace std;
+using namespace cv;
 
 //#define PROCESS_EUROC_DATASET
 //#define PROCESS_IPHONE_DATASET
@@ -22,6 +23,9 @@ void readAndroidTimestamp(const std::string& file_path);
 void prepareDataset(const std::string& dataset_path);
 
 void processDataset(const std::string& dataset_path);
+
+void trackWithOpticalFlow(cv::Mat& last_frame, cv::Mat& curr_frame, 
+                size_t frame_idx, std::list<cv::Point2f>& keypoints);
 
 std::map<unsigned int, double> iphone_timestamp_storage;
 size_t iphone_img_counter = 0;
@@ -108,6 +112,8 @@ void processDataset(const std::string& dataset_path) {
 #endif 
 
 #ifdef PROCESS_ANDROID_DATASET  
+    std::list<cv::Point2f> keypoints;
+    cv::Mat gray_frame, last_frame;
     for (size_t i = 0; i < android_timestamp_storage.size(); ++i) {
         
         const std::string img_path(dataset_path + "/image/" + std::to_string(android_timestamp_storage[i]) + ".png");
@@ -120,9 +126,16 @@ void processDataset(const std::string& dataset_path) {
         
         //std::cout << "Image w: " << input_frame.cols << " h: " << input_frame.rows << "\n";
 
+        cv::cvtColor(input_frame, gray_frame, CV_RGBA2GRAY);
+        trackWithOpticalFlow(last_frame, gray_frame, i, keypoints);
+        
+        for (auto kp : keypoints) {
+            cv::circle(input_frame, kp, 3, cv::Scalar(0, 255, 0), 1);
+        }
+
         cv::imshow("Frame", input_frame);
 
-        cv::waitKey(30);
+        cv::waitKey(1);
     }
 #endif 
 
@@ -256,4 +269,66 @@ void readAndroidTimestamp(const std::string& file_path) {
         }
     
         printf("readAndroidTimestamp found %lu images\n", android_timestamp_storage.size());
+}
+
+void trackWithOpticalFlow(cv::Mat& last_frame, cv::Mat& curr_frame, 
+                size_t frame_idx, std::list<cv::Point2f>& keypoints) {
+    double t1 = 0.0, t2 = 0.0;
+    if (frame_idx % 3 == 0) 
+    {
+        t1 = cv::getTickCount();
+        keypoints.clear();
+        // std::vector<cv::KeyPoint> kpts;
+        // cv::Ptr<cv::FastFeatureDetector> fast_detector = 
+        //         cv::FastFeatureDetector::create(20, true, cv::FastFeatureDetector::TYPE_9_16);
+        // fast_detector->detect(curr_frame, kpts);
+
+        // for (KeyPoint kp : kpts) {
+        //     keypoints.push_back(kp.pt);
+        // }
+        std::vector<cv::Point2f> kpts;
+        cv::goodFeaturesToTrack(curr_frame, kpts, 70, 0.01, 30);
+        for (auto kp : kpts) {
+            keypoints.push_back(kp);
+        }
+        t2 = cv::getTickCount();
+        std::cout << "[Frame " << frame_idx << "] Detect " << keypoints.size() << " feature points in " 
+                << (t2 - t1) * 1000.0 / cv::getTickFrequency() << " ms" << std::endl;
+    }
+    else 
+    {
+        t1 = cv::getTickCount();
+        std::vector<cv::Point2f> prev_keypoints;
+        std::vector<cv::Point2f> curr_keypoints;
+
+        for (cv::Point2f pt : keypoints) {
+            prev_keypoints.push_back(pt);
+        }
+
+        std::vector<unsigned char> status;
+        std::vector<float> error;
+
+        cv::calcOpticalFlowPyrLK(last_frame, curr_frame, prev_keypoints, curr_keypoints, status, error);
+
+        // update the maintained keypoints
+        size_t i = 0;
+        for (auto iter = keypoints.begin(); iter != keypoints.end(); ++i) {
+            if (status[i] == 0) {
+                iter = keypoints.erase(iter);
+                continue;
+            }
+            *iter = curr_keypoints[i];
+            iter++;
+        }
+
+        t2 = cv::getTickCount();
+        if (keypoints.size() == 0) {
+            std::cout << "All keypoints lost at Frame " << frame_idx << std::endl;
+        } else {
+            std::cout << "[Frame " << frame_idx << "] Track " << keypoints.size() << " feature points in " 
+                    << (t2 - t1) * 1000.0 / cv::getTickFrequency() << " ms" << std::endl;
+        }
+    }
+
+    last_frame = curr_frame.clone();
 }
