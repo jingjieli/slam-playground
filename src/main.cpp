@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <math.h>
+#include <algorithm>
 #include "opencv2/opencv.hpp"
 #include "boost/filesystem.hpp"
 
@@ -27,11 +28,20 @@ void processDataset(const std::string& dataset_path);
 void trackWithOpticalFlow(cv::Mat& last_frame, cv::Mat& curr_frame, 
                 size_t frame_idx, std::list<cv::Point2f>& keypoints);
 
+void trackWithFeatureMatching(cv::Mat& frame, size_t frame_idx);
+
 std::map<unsigned int, double> iphone_timestamp_storage;
 size_t iphone_img_counter = 0;
 size_t iphone_img_num = 0;
 std::vector<long> euroc_timestamp_storage;
 std::vector<long> android_timestamp_storage;
+
+cv::Ptr<cv::ORB> orb_detector;
+std::vector<KeyPoint> orb_keypoints_1, orb_keypoints_2;
+cv::Mat orb_descriptors_1, orb_descriptors_2;
+std::vector<cv::DMatch> orb_matches;
+std::vector<cv::DMatch> good_matches;
+cv::Ptr<BFMatcher> orb_matcher;
 
 int main(int argc, char** argv) {
 
@@ -113,7 +123,7 @@ void processDataset(const std::string& dataset_path) {
 
 #ifdef PROCESS_ANDROID_DATASET  
     std::list<cv::Point2f> keypoints;
-    cv::Mat gray_frame, last_frame;
+    cv::Mat gray_frame, last_frame, img_matched;
     for (size_t i = 0; i < android_timestamp_storage.size(); ++i) {
         
         const std::string img_path(dataset_path + "/image/" + std::to_string(android_timestamp_storage[i]) + ".png");
@@ -127,13 +137,30 @@ void processDataset(const std::string& dataset_path) {
         //std::cout << "Image w: " << input_frame.cols << " h: " << input_frame.rows << "\n";
 
         cv::cvtColor(input_frame, gray_frame, CV_RGBA2GRAY);
-        trackWithOpticalFlow(last_frame, gray_frame, i, keypoints);
+        // trackWithOpticalFlow(last_frame, gray_frame, i, keypoints);
         
-        for (auto kp : keypoints) {
-            cv::circle(input_frame, kp, 3, cv::Scalar(0, 255, 0), 1);
+        // for (auto kp : keypoints) {
+        //     cv::circle(input_frame, kp, 3, cv::Scalar(0, 255, 0), 1);
+        // }
+
+        trackWithFeatureMatching(gray_frame, i);
+        last_frame = input_frame.clone();
+        
+        if (i % 2 == 0)
+        {
+            if (i != 0) 
+            {
+                drawMatches(last_frame, orb_keypoints_2, input_frame, orb_keypoints_1, good_matches, img_matched);
+                cv::imshow("Frame", img_matched);
+            }
+        }
+        else 
+        {
+            drawMatches(last_frame, orb_keypoints_1, input_frame, orb_keypoints_2, good_matches, img_matched);
+            cv::imshow("Frame", img_matched);
         }
 
-        cv::imshow("Frame", input_frame);
+        //cv::imshow("Frame", input_frame);
 
         cv::waitKey(1);
     }
@@ -331,4 +358,63 @@ void trackWithOpticalFlow(cv::Mat& last_frame, cv::Mat& curr_frame,
     }
 
     last_frame = curr_frame.clone();
+}
+
+void trackWithFeatureMatching(cv::Mat& frame, size_t frame_idx) {
+    double t1 = 0.0, t2 = 0.0;
+    t1 = cv::getTickCount();
+    if (!orb_detector) {
+        orb_detector = cv::ORB::create(500, 1.2f, 8, 31, 0, 2, cv::ORB::HARRIS_SCORE, 31, 20);
+    }
+
+    if (!orb_matcher) {
+        orb_matcher = cv::BFMatcher::create(NORM_HAMMING, false);
+    }
+
+    orb_matches.clear();
+    good_matches.clear();
+
+    if (frame_idx % 2 == 0) 
+    {
+        orb_keypoints_1.clear();
+        orb_detector->detect(frame, orb_keypoints_1);
+        orb_detector->compute(frame, orb_keypoints_1, orb_descriptors_1);
+
+        if (frame_idx != 0) 
+        {
+            orb_matcher->match(orb_descriptors_2, orb_descriptors_1, orb_matches);
+        } 
+        else 
+        {
+            return;
+        }
+    } 
+    else {
+        orb_keypoints_2.clear();
+        orb_detector->detect(frame, orb_keypoints_2);
+        orb_detector->compute(frame, orb_keypoints_2, orb_descriptors_2);
+        orb_matcher->match(orb_descriptors_1, orb_descriptors_2, orb_matches);
+    }
+
+    double min_dist = 10000, max_dist = 0;
+
+    for (size_t i = 0; i < orb_matches.size(); ++i) 
+    {
+        double dist = orb_matches[i].distance;
+        if (dist > max_dist) max_dist = dist;
+        if (dist < min_dist) min_dist = dist;
+    }
+
+    for (size_t i = 0; i < orb_descriptors_1.rows; ++i)
+    {
+        if (orb_matches[i].distance <= std::max(2 * min_dist, 15.0)) 
+        {
+            good_matches.push_back(orb_matches[i]);
+        }
+    }
+    t2 = cv::getTickCount();
+    std::cout << "Frame [" << frame_idx << "] Tracking uses " << (t2 - t1) * 1000.0 /cv::getTickFrequency()
+             << " ms. Max dist: " << max_dist << " Min dist: " << min_dist 
+             << " Matches: " << orb_matches.size() << " Good matches: " << good_matches.size() << std::endl;
+
 }
