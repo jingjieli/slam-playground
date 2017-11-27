@@ -592,28 +592,26 @@ void triangulation(const cv::Mat& rotation_matrix,
     }
 
     cv::Mat pts_4d;
-    std::cout << "T1: " << T1 << std::endl;
-    std::cout << "T2: " << T2 << std::endl;
-    std::cout << "pts_1: " << pts_1 << std::endl;
-    std::cout << "pts_2: " << pts_2 << std::endl;
-    std::cout << "pts_4d: " << pts_4d << std::endl;
+    // std::cout << "T1: " << T1 << std::endl;
+    // std::cout << "T2: " << T2 << std::endl;
+    // std::cout << "pts_1: " << pts_1 << std::endl;
+    // std::cout << "pts_2: " << pts_2 << std::endl;
+    // std::cout << "pts_4d: " << pts_4d << std::endl;
     cv::triangulatePoints(T1, T2, pts_1, pts_2, pts_4d); // hmm... buggy. 
-
-    //std::cout << "pts_4d: " << pts_4d << std::endl;
 
     points_3d.clear();
 
     for (size_t i = 0; i < pts_4d.cols; ++i)
     {
         cv::Mat x = pts_4d.col(i);
-        x /= x.at<double>(3, 0);
+        x /= x.at<float>(3, 0); // was <double>, cause strange behavior in triangulatePoints return matrix... hmm... 
         cv::Point3d point_3d(
-            x.at<double>(0, 0),
-            x.at<double>(1, 0),
-            x.at<double>(2, 0)
+            x.at<float>(0, 0),
+            x.at<float>(1, 0),
+            x.at<float>(2, 0)
         );
         points_3d.push_back(point_3d);
-        std::cout << "p: " << point_3d << std::endl;
+        //std::cout << "p: " << point_3d << std::endl;
     }
 }
 
