@@ -30,6 +30,32 @@ void trackWithOpticalFlow(cv::Mat& last_frame, cv::Mat& curr_frame,
 
 void trackWithFeatureMatching(cv::Mat& frame, size_t frame_idx);
 
+void estimateCameraPose(const std::vector<cv::KeyPoint>& prev_keypoints, 
+                        const std::vector<cv::KeyPoint>& curr_keypoints, 
+                        const std::vector<DMatch>& matches);
+
+void validateCameraPose(const cv::Mat& rotation_matrix,
+                        const cv::Mat& translation_matrix,
+                        const std::vector<cv::KeyPoint>& prev_keypoints, 
+                        const std::vector<cv::KeyPoint>& curr_keypoints, 
+                        const std::vector<DMatch>& matches);
+
+cv::Point2f pixel2camera(const cv::Point2f& pixel_point, const cv::Mat& camera_matrix);
+
+void triangulation(const cv::Mat& rotation_matrix,
+                    const cv::Mat& translation_matrix,
+                    const std::vector<cv::KeyPoint>& prev_keypoints, 
+                    const std::vector<cv::KeyPoint>& curr_keypoints, 
+                    const std::vector<DMatch>& matches,
+                    std::vector<cv::Point3d>& points_3d);
+
+void validateTriangulation(const cv::Mat& rotation_matrix,
+                            const cv::Mat& translation_matrix,
+                            const std::vector<cv::KeyPoint>& prev_keypoints, 
+                            const std::vector<cv::KeyPoint>& curr_keypoints, 
+                            const std::vector<DMatch>& matches,
+                            const std::vector<cv::Point3d>& points_3d);
+
 std::map<unsigned int, double> iphone_timestamp_storage;
 size_t iphone_img_counter = 0;
 size_t iphone_img_num = 0;
@@ -52,7 +78,13 @@ std::vector<KeyPoint> orb_keypoints_1, orb_keypoints_2;
 cv::Mat orb_descriptors_1, orb_descriptors_2;
 std::vector<cv::DMatch> orb_matches;
 std::vector<cv::DMatch> good_matches;
-cv::Ptr<BFMatcher> orb_matcher;
+cv::Ptr<DescriptorMatcher> orb_matcher;
+
+// ********* Pose Estimation *********
+cv::Mat camera_intrinsics, fundamental_matrix, essential_matrix, homography_matrix, R, t;
+std::vector<cv::Point2f> matched_keypoints_1;
+std::vector<cv::Point2f> matched_keypoints_2;
+std::vector<cv::Point3d> world_points;
 
 int main(int argc, char** argv) {
 
@@ -164,19 +196,27 @@ void processDataset(const std::string& dataset_path) {
 
         // cv::imshow("Frame", input_frame);
 
-        trackWithFeatureMatching(gray_frame, i);
+        trackWithFeatureMatching(input_frame, i);
         last_frame = input_frame.clone();
         
         if (i % 2 == 0)
         {
             if (i != 0) 
             {
+                estimateCameraPose(orb_keypoints_2, orb_keypoints_1, good_matches);
+                validateCameraPose(R, t, orb_keypoints_2, orb_keypoints_1, good_matches);
+                triangulation(R, t, orb_keypoints_2, orb_keypoints_1, good_matches, world_points);
+                validateTriangulation(R, t, orb_keypoints_2, orb_keypoints_1, good_matches, world_points);
                 drawMatches(last_frame, orb_keypoints_2, input_frame, orb_keypoints_1, good_matches, img_matched);
                 cv::imshow("Frame", img_matched);
             }
         }
         else 
         {
+            estimateCameraPose(orb_keypoints_1, orb_keypoints_2, good_matches);
+            validateCameraPose(R, t, orb_keypoints_1, orb_keypoints_2, good_matches);
+            triangulation(R, t, orb_keypoints_1, orb_keypoints_2, good_matches, world_points);
+            validateTriangulation(R, t, orb_keypoints_1, orb_keypoints_2, good_matches, world_points);
             drawMatches(last_frame, orb_keypoints_1, input_frame, orb_keypoints_2, good_matches, img_matched);
             cv::imshow("Frame", img_matched);
         }
@@ -390,7 +430,7 @@ void trackWithFeatureMatching(cv::Mat& frame, size_t frame_idx) {
     }
 
     if (!orb_matcher) {
-        orb_matcher = cv::BFMatcher::create(NORM_HAMMING, false);
+        orb_matcher = cv::DescriptorMatcher::create("BruteForce-Hamming");
     }
 
     orb_matches.clear();
@@ -411,7 +451,8 @@ void trackWithFeatureMatching(cv::Mat& frame, size_t frame_idx) {
             return;
         }
     } 
-    else {
+    else 
+    {
         orb_keypoints_2.clear();
         orb_detector->detect(frame, orb_keypoints_2);
         orb_detector->compute(frame, orb_keypoints_2, orb_descriptors_2);
@@ -420,7 +461,7 @@ void trackWithFeatureMatching(cv::Mat& frame, size_t frame_idx) {
 
     double min_dist = 10000, max_dist = 0;
 
-    for (size_t i = 0; i < orb_matches.size(); ++i) 
+    for (size_t i = 0; i < orb_descriptors_1.rows; ++i) 
     {
         double dist = orb_matches[i].distance;
         if (dist > max_dist) max_dist = dist;
@@ -429,7 +470,7 @@ void trackWithFeatureMatching(cv::Mat& frame, size_t frame_idx) {
 
     for (size_t i = 0; i < orb_descriptors_1.rows; ++i)
     {
-        if (orb_matches[i].distance <= std::max(2 * min_dist, 15.0)) 
+        if (orb_matches[i].distance <= std::max(2 * min_dist, 30.0)) 
         {
             good_matches.push_back(orb_matches[i]);
         }
@@ -438,5 +479,169 @@ void trackWithFeatureMatching(cv::Mat& frame, size_t frame_idx) {
     std::cout << "Frame [" << frame_idx << "] Tracking uses " << (t2 - t1) * 1000.0 /cv::getTickFrequency()
              << " ms. Max dist: " << max_dist << " Min dist: " << min_dist 
              << " Matches: " << orb_matches.size() << " Good matches: " << good_matches.size() << std::endl;
+
+}
+
+void estimateCameraPose(const std::vector<cv::KeyPoint>& prev_keypoints, 
+                        const std::vector<cv::KeyPoint>& curr_keypoints, 
+                        const std::vector<DMatch>& matches) {
+    
+    if (camera_intrinsics.empty())
+    {
+        std::cout << "Setup camera intrinsics" << std::endl;
+        camera_intrinsics = (cv::Mat_<double>(3, 3) << 639.073, 0.0, 320.0, 0.0, 639.073, 240.0, 0.0, 0.0, 1.0);
+    }
+
+    matched_keypoints_1.clear();
+    matched_keypoints_2.clear();
+
+    for (size_t i = 0; i < matches.size(); ++i)
+    {
+        matched_keypoints_1.push_back(prev_keypoints[matches[i].queryIdx].pt);
+        matched_keypoints_2.push_back(curr_keypoints[matches[i].trainIdx].pt);
+    }
+
+    fundamental_matrix = cv::findFundamentalMat(matched_keypoints_1, matched_keypoints_2, CV_FM_8POINT);
+
+    cv::Point2d principal_point(320.0, 240.0);
+    //double focal_length = 639.073;
+    int focal_length = 639;
+
+    essential_matrix = cv::findEssentialMat(matched_keypoints_1, matched_keypoints_2, focal_length, principal_point, RANSAC);
+
+    homography_matrix = cv::findHomography(matched_keypoints_1, matched_keypoints_2, RANSAC, 3, cv::noArray(), 2000, 0.99);
+
+    cv::recoverPose(essential_matrix, matched_keypoints_1, matched_keypoints_2, R, t, focal_length, principal_point);
+
+    std::cout << "---------- Pose Estimation ----------" << std::endl;
+
+    std::cout << "fundamental_matrix: " << std::endl;
+    std::cout << fundamental_matrix << std::endl << std::endl;
+
+    std::cout << "essential_matrix: " << std::endl;
+    std::cout << essential_matrix << std::endl << std::endl;
+
+    std::cout << "homography_matrix: " << std::endl;
+    std::cout << homography_matrix << std::endl << std::endl;
+
+    std::cout << "R: " << std::endl;
+    std::cout << R << std::endl;
+
+    std::cout << "t: " << std::endl;
+    std::cout << t << std::endl;
+
+    std::cout << "--------------------------------------" << std::endl << std::endl;
+}
+
+cv::Point2f pixel2camera(const cv::Point2f& pixel_point, const cv::Mat& camera_matrix) {
+    
+    return cv::Point2f(
+        (pixel_point.x - camera_matrix.at<double>(0, 2)) / camera_matrix.at<double>(0, 0),
+        (pixel_point.y - camera_matrix.at<double>(1, 2)) / camera_matrix.at<double>(1, 1)
+    );
+
+}
+
+void validateCameraPose(const cv::Mat& rotation_matrix,
+                        const cv::Mat& translation_matrix,
+                        const std::vector<cv::KeyPoint>& prev_keypoints, 
+                        const std::vector<cv::KeyPoint>& curr_keypoints, 
+                        const std::vector<DMatch>& matches) {
+    
+    cv::Mat t_x = (cv::Mat_<double>(3, 3) << 0.0, -translation_matrix.at<double>(2, 0), translation_matrix.at<double>(1, 0), 
+                                             translation_matrix.at<double>(2, 0), 0.0, -translation_matrix.at<double>(0, 0),
+                                             -translation_matrix.at<double>(1, 0), translation_matrix.at<double>(0, 0), 0.0);
+
+    std::cout << "t_x^R: " << std::endl << t_x * rotation_matrix << std::endl << std::endl;
+
+    for (DMatch match : matches)
+    {
+        cv::Point2f pt1 = pixel2camera(prev_keypoints[match.queryIdx].pt, camera_intrinsics);
+        cv::Point2f pt2 = pixel2camera(curr_keypoints[match.trainIdx].pt, camera_intrinsics);
+        
+        cv::Mat y1 = (cv::Mat_<double>(3, 1) << pt1.x, pt1.y, 1);
+        cv::Mat y2 = (cv::Mat_<double>(3, 1) << pt2.x, pt2.y, 1);
+
+        //std::cout << "epipolar constraint: " << y2.t() * t_x * rotation_matrix * y1 << std::endl;
+    }
+
+}
+
+void triangulation(const cv::Mat& rotation_matrix,
+                    const cv::Mat& translation_matrix,
+                    const std::vector<cv::KeyPoint>& prev_keypoints, 
+                    const std::vector<cv::KeyPoint>& curr_keypoints, 
+                    const std::vector<DMatch>& matches,
+                    std::vector<cv::Point3d>& points_3d) {
+
+    cv::Mat T1 = (cv::Mat_<float>(3, 4) << 1.0, 0.0, 0.0, 0.0,
+                                            0.0, 1.0, 0.0, 0.0,
+                                            0.0, 0.0, 1.0, 0.0);
+
+    cv::Mat T2 = (cv::Mat_<float>(3, 4) << 
+        rotation_matrix.at<double>(0, 0), rotation_matrix.at<double>(0, 1), rotation_matrix.at<double>(0, 2), translation_matrix.at<double>(0, 0),
+        rotation_matrix.at<double>(1, 0), rotation_matrix.at<double>(1, 1), rotation_matrix.at<double>(1, 2), translation_matrix.at<double>(1, 0),
+        rotation_matrix.at<double>(2, 0), rotation_matrix.at<double>(2, 1), rotation_matrix.at<double>(2, 2), translation_matrix.at<double>(2, 0)   
+    );
+
+    std::vector<cv::Point2f> pts_1, pts_2;
+    for (DMatch match : matches) 
+    {
+        pts_1.push_back ( pixel2camera( prev_keypoints[match.queryIdx].pt, camera_intrinsics) );
+        pts_2.push_back ( pixel2camera( curr_keypoints[match.trainIdx].pt, camera_intrinsics) );
+    }
+
+    cv::Mat pts_4d;
+    std::cout << "T1: " << T1 << std::endl;
+    std::cout << "T2: " << T2 << std::endl;
+    std::cout << "pts_1: " << pts_1 << std::endl;
+    std::cout << "pts_2: " << pts_2 << std::endl;
+    std::cout << "pts_4d: " << pts_4d << std::endl;
+    cv::triangulatePoints(T1, T2, pts_1, pts_2, pts_4d); // hmm... buggy. 
+
+    //std::cout << "pts_4d: " << pts_4d << std::endl;
+
+    points_3d.clear();
+
+    for (size_t i = 0; i < pts_4d.cols; ++i)
+    {
+        cv::Mat x = pts_4d.col(i);
+        x /= x.at<double>(3, 0);
+        cv::Point3d point_3d(
+            x.at<double>(0, 0),
+            x.at<double>(1, 0),
+            x.at<double>(2, 0)
+        );
+        points_3d.push_back(point_3d);
+        std::cout << "p: " << point_3d << std::endl;
+    }
+}
+
+void validateTriangulation(const cv::Mat& rotation_matrix,
+                            const cv::Mat& translation_matrix,
+                            const std::vector<cv::KeyPoint>& prev_keypoints, 
+                            const std::vector<cv::KeyPoint>& curr_keypoints, 
+                            const std::vector<DMatch>& matches,
+                            const std::vector<cv::Point3d>& points_3d) {
+
+    for (size_t i = 0; i < matches.size(); ++i)
+    {
+        cv::Point2f pt1_cam = pixel2camera(prev_keypoints[matches[i].queryIdx].pt, camera_intrinsics);
+
+        cv::Point2d pt1_cam_3d(
+            points_3d[i].x / points_3d[i].z,
+            points_3d[i].y / points_3d[i].z
+        );
+
+        cv::Point2f pt2_cam = pixel2camera(curr_keypoints[matches[i].trainIdx].pt, camera_intrinsics);
+        cv::Mat pt2_trans = rotation_matrix * (cv::Mat_<double>(3, 1) << points_3d[i].x, points_3d[i].y, points_3d[i].z) + translation_matrix;
+        pt2_trans /= pt2_trans.at<double>(2, 0); 
+
+        std::cout << "Point in first camera frame: " << pt1_cam << std::endl;
+        std::cout << "Point reprojected from 3D: " << pt1_cam_3d << " d = " << points_3d[i].z << std::endl;
+
+        std::cout << "Point in second camera frame: " << pt2_cam << std::endl;
+        std::cout << "Point reprojected from second frame: " << pt2_trans.t() << std::endl << std::endl;
+    }
 
 }
